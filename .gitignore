@@ -82,8 +82,7 @@ Thumbs.db
 *.log
 
 # Model and data artifacts (optional - remove if you track them intentionally)
-model/
-data/
+
 
 # Ignore system virtual environment backup folders if present
 venv/

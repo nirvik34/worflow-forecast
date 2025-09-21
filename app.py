@@ -6,10 +6,8 @@ from datetime import datetime
 from tensorflow.keras.models import load_model
 import joblib
 
-# === FastAPI instance ===
 app = FastAPI(title="Workforce Prediction API", version="1.0")
 
-# === Load model & scalers at startup ===
 try:
     model = load_model('./model/model.keras', compile=False)
     model.compile(optimizer='adam', loss='mse')

@@ -160,7 +160,20 @@ def predict_cases(problem_type, target_date):
         last_date = last_row["date"]
         for i in range(SEQUENCE_LENGTH - len(seq)):
             new_row = last_row.copy()
-            new_row["date"] = last_date + pd.Timedelta(days=i+1)
+            new_date = last_date + pd.Timedelta(days=i + 1)
+            new_row["date"] = new_date
+            # update simple time features if present so inputs vary by date
+            if "day_of_year" in seq.columns:
+                new_row["day_of_year"] = new_date.timetuple().tm_yday
+            if "weekday" in seq.columns:
+                new_row["weekday"] = new_date.weekday()
+            if "month" in seq.columns:
+                new_row["month"] = new_date.month
+            # optional: add cyclical day-of-year encodings if model expects them
+            if "dayofyear_sin" in seq.columns and "dayofyear_cos" in seq.columns:
+                doy = new_date.timetuple().tm_yday
+                new_row["dayofyear_sin"] = np.sin(2 * np.pi * doy / 365.25)
+                new_row["dayofyear_cos"] = np.cos(2 * np.pi * doy / 365.25)
             seq = pd.concat([seq, pd.DataFrame([new_row])], ignore_index=True)
 
     X_seq = seq.drop(columns=["date", "reported_cases", "workforce_required"], errors="ignore")

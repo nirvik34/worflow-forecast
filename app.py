@@ -18,8 +18,6 @@ TF_RANDOM_SEED = 42
 np.random.seed(0)
 
 # Load model & encoders (keep your original paths)
-
-
 @lru_cache(maxsize=1)
 def load_artifacts():
     # lazy load heavy artifacts once per process
@@ -29,6 +27,7 @@ def load_artifacts():
     scaler_y = joblib.load('./model/scaler_y.pkl')
     encoder = joblib.load('./model/encoder.pkl')
     return model, scaler_X, scaler_y, encoder
+
 
 # Load dataset
 df = pd.read_csv(CSV_PATH)
@@ -54,9 +53,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 class PredictionRequest(BaseModel):
     problem: str
     date: str  # YYYY-MM-DD
+
 
 # Safe conversion helpers
 def safe_float(x, fallback=np.nan):
@@ -67,6 +68,7 @@ def safe_float(x, fallback=np.nan):
     except Exception:
         return fallback
 
+
 def safe_int(x, fallback=1):
     try:
         if pd.isna(x):
@@ -75,6 +77,7 @@ def safe_int(x, fallback=1):
         return v
     except Exception:
         return fallback
+
 
 # Normalize problem_type matching (case-insensitive)
 def find_canonical_problem(name):
@@ -85,6 +88,7 @@ def find_canonical_problem(name):
         if isinstance(p, str) and p.strip().lower() == name_norm:
             return p
     return None
+
 
 # Helper: dynamic workforce calculation (defensive)
 def calculate_dynamic_workforce(predicted_cases, problem_type, df, urgency_factor=1.0, max_workers=200):
@@ -145,6 +149,7 @@ def calculate_dynamic_workforce(predicted_cases, problem_type, df, urgency_facto
     workforce = min(workforce, max_workers)
     return max(1, int(round(workforce)))
 
+
 # Helper: predict next day cases dynamically (defensive)
 def predict_cases(problem_type, target_date):
     # filter case-insensitively
@@ -155,13 +160,25 @@ def predict_cases(problem_type, target_date):
 
     seq_len = SEQUENCE_LENGTH
     seq = subset.tail(seq_len).copy()
-    if len(seq) < seq_len:
-        # pad with last known row
+    if len(seq) < SEQUENCE_LENGTH:
         last_row = seq.iloc[-1].copy()
-        last_date = last_row['date']
-        for i in range(seq_len - len(seq)):
+        last_date = last_row["date"]
+        for i in range(SEQUENCE_LENGTH - len(seq)):
             new_row = last_row.copy()
-            new_row['date'] = last_date + pd.Timedelta(days=i+1)
+            new_date = last_date + pd.Timedelta(days=i + 1)
+            new_row["date"] = new_date
+            # update simple time features if present so inputs vary by date
+            if "day_of_year" in seq.columns:
+                new_row["day_of_year"] = new_date.timetuple().tm_yday
+            if "weekday" in seq.columns:
+                new_row["weekday"] = new_date.weekday()
+            if "month" in seq.columns:
+                new_row["month"] = new_date.month
+            # optional: add cyclical day-of-year encodings if model expects them
+            if "dayofyear_sin" in seq.columns and "dayofyear_cos" in seq.columns:
+                doy = new_date.timetuple().tm_yday
+                new_row["dayofyear_sin"] = np.sin(2 * np.pi * doy / 365.25)
+                new_row["dayofyear_cos"] = np.cos(2 * np.pi * doy / 365.25)
             seq = pd.concat([seq, pd.DataFrame([new_row])], ignore_index=True)
 
     X_seq_to_predict = seq.drop(columns=['date', 'reported_cases', 'workforce_required'], errors='ignore')
@@ -203,10 +220,12 @@ def predict_cases(problem_type, target_date):
 
     return predicted_cases
 
+
 @app.get("/problems")
 def get_problems():
     # return canonical list
     return {"problems": problem_types}
+
 
 @app.post("/predict")
 def predict(request: PredictionRequest):

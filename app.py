@@ -8,6 +8,7 @@ from datetime import datetime
 import joblib
 from tensorflow.keras.models import load_model
 import logging
+from functools import lru_cache
 
 logging.basicConfig(level=logging.INFO)
 
@@ -17,11 +18,17 @@ TF_RANDOM_SEED = 42
 np.random.seed(0)
 
 # Load model & encoders (keep your original paths)
-model = load_model('./model/model.keras', compile=False)
-model.compile(optimizer='adam', loss='mse')
-scaler_X = joblib.load('./model/scaler_X.pkl')
-scaler_y = joblib.load('./model/scaler_y.pkl')
-encoder = joblib.load('./model/encoder.pkl')
+
+
+@lru_cache(maxsize=1)
+def load_artifacts():
+    # lazy load heavy artifacts once per process
+    model = load_model('./model/model.keras', compile=False)
+    model.compile(optimizer='adam', loss='mse')
+    scaler_X = joblib.load('./model/scaler_X.pkl')
+    scaler_y = joblib.load('./model/scaler_y.pkl')
+    encoder = joblib.load('./model/encoder.pkl')
+    return model, scaler_X, scaler_y, encoder
 
 # Load dataset
 df = pd.read_csv(CSV_PATH)
@@ -173,12 +180,10 @@ def predict_cases(problem_type, target_date):
             logging.warning("Encoder transform failed (%s). Dropping categorical columns as fallback.", e)
             X_seq_to_predict = X_seq_to_predict.drop(columns=cat_cols)
 
-    # Try using scaler+model; if anything fails, fallback to last reported_cases
     try:
         X_scaled = scaler_X.transform(X_seq_to_predict)
         X_input = np.array([X_scaled])
         y_pred_scaled = model.predict(X_input, verbose=0)
-        # make sure scaler_y gets a 2D array
         if y_pred_scaled.ndim == 1:
             y_pred_scaled = y_pred_scaled.reshape(-1, 1)
         y_inv = scaler_y.inverse_transform(y_pred_scaled)

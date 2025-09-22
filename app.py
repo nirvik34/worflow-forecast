@@ -151,74 +151,72 @@ def calculate_dynamic_workforce(predicted_cases, problem_type, df, urgency_facto
 
 
 # Helper: predict next day cases dynamically (defensive)
+# --- updated predict_cases ---
 def predict_cases(problem_type, target_date):
-    # filter case-insensitively
     subset = df[df['problem_type'].fillna('').str.strip().str.lower() == problem_type.strip().lower()].sort_values('date')
     if subset.empty:
-        # fallback random / small heuristic
         return int(np.random.randint(1, 20))
 
     seq_len = SEQUENCE_LENGTH
     seq = subset.tail(seq_len).copy()
-    if len(seq) < SEQUENCE_LENGTH:
+
+    # if target_date is after last known date, extend step by step until target_date
+    last_known_date = seq['date'].iloc[-1]
+    while last_known_date < target_date:
         last_row = seq.iloc[-1].copy()
-        last_date = last_row["date"]
-        for i in range(SEQUENCE_LENGTH - len(seq)):
-            new_row = last_row.copy()
-            new_date = last_date + pd.Timedelta(days=i + 1)
-            new_row["date"] = new_date
-            # update simple time features if present so inputs vary by date
-            if "day_of_year" in seq.columns:
-                new_row["day_of_year"] = new_date.timetuple().tm_yday
-            if "weekday" in seq.columns:
-                new_row["weekday"] = new_date.weekday()
-            if "month" in seq.columns:
-                new_row["month"] = new_date.month
-            # optional: add cyclical day-of-year encodings if model expects them
-            if "dayofyear_sin" in seq.columns and "dayofyear_cos" in seq.columns:
-                doy = new_date.timetuple().tm_yday
-                new_row["dayofyear_sin"] = np.sin(2 * np.pi * doy / 365.25)
-                new_row["dayofyear_cos"] = np.cos(2 * np.pi * doy / 365.25)
-            seq = pd.concat([seq, pd.DataFrame([new_row])], ignore_index=True)
+        new_date = last_row["date"] + pd.Timedelta(days=1)
+        new_row = last_row.copy()
+        new_row["date"] = new_date
+        # update date-based features
+        if "day_of_year" in seq.columns:
+            new_row["day_of_year"] = new_date.timetuple().tm_yday
+        if "weekday" in seq.columns:
+            new_row["weekday"] = new_date.weekday()
+        if "month" in seq.columns:
+            new_row["month"] = new_date.month
+        if "dayofyear_sin" in seq.columns and "dayofyear_cos" in seq.columns:
+            doy = new_date.timetuple().tm_yday
+            new_row["dayofyear_sin"] = np.sin(2 * np.pi * doy / 365.25)
+            new_row["dayofyear_cos"] = np.cos(2 * np.pi * doy / 365.25)
 
-    X_seq_to_predict = seq.drop(columns=['date', 'reported_cases', 'workforce_required'], errors='ignore')
+        # --- predict next step using seq ---
+        X_seq_to_predict = seq.tail(seq_len).drop(columns=['date','reported_cases','workforce_required'], errors='ignore')
 
-    # handle categorical encoding safely
-    cat_cols = [c for c in ['problem_type', 'region'] if c in X_seq_to_predict.columns]
-    if cat_cols:
-        try:
-            cat_transformed = pd.DataFrame(
-                encoder.transform(X_seq_to_predict[cat_cols]),
-                columns=encoder.get_feature_names_out(cat_cols),
-                index=X_seq_to_predict.index
-            )
-            X_seq_to_predict = pd.concat([X_seq_to_predict.drop(columns=cat_cols), cat_transformed], axis=1)
-        except Exception as e:
-            logging.warning("Encoder transform failed (%s). Dropping categorical columns as fallback.", e)
-            X_seq_to_predict = X_seq_to_predict.drop(columns=cat_cols)
-
-    try:
-        X_scaled = scaler_X.transform(X_seq_to_predict)
-        X_input = np.array([X_scaled])
-        y_pred_scaled = model.predict(X_input, verbose=0)
-        if y_pred_scaled.ndim == 1:
-            y_pred_scaled = y_pred_scaled.reshape(-1, 1)
-        y_inv = scaler_y.inverse_transform(y_pred_scaled)
-        predicted_cases = max(1, safe_int(y_inv[0, 0], fallback=1))
-    except Exception as e:
-        logging.warning("Model/scaler prediction failed: %s. Falling back to heuristic.", e)
-        last_reported = None
-        if 'reported_cases' in seq.columns:
+        # categorical encoding safe
+        cat_cols = [c for c in ['problem_type', 'region'] if c in X_seq_to_predict.columns]
+        if cat_cols:
             try:
-                last_reported = seq['reported_cases'].dropna().iloc[-1]
+                cat_transformed = pd.DataFrame(
+                    encoder.transform(X_seq_to_predict[cat_cols]),
+                    columns=encoder.get_feature_names_out(cat_cols),
+                    index=X_seq_to_predict.index
+                )
+                X_seq_to_predict = pd.concat([X_seq_to_predict.drop(columns=cat_cols), cat_transformed], axis=1)
             except Exception:
-                last_reported = None
-        if last_reported is None or not np.isfinite(safe_float(last_reported)):
-            predicted_cases = int(np.random.randint(1, 10))
-        else:
-            predicted_cases = max(1, safe_int(last_reported, fallback=1))
+                X_seq_to_predict = X_seq_to_predict.drop(columns=cat_cols)
 
-    return predicted_cases
+        try:
+            X_scaled = scaler_X.transform(X_seq_to_predict)
+            X_input = np.array([X_scaled])
+            y_pred_scaled = model.predict(X_input, verbose=0)
+            y_inv = scaler_y.inverse_transform(y_pred_scaled)
+            predicted_cases = max(1, safe_int(y_inv[0, 0], fallback=1))
+        except Exception:
+            # fallback = repeat last known
+            predicted_cases = safe_int(seq['reported_cases'].iloc[-1], fallback=1)
+
+        new_row["reported_cases"] = predicted_cases
+        seq = pd.concat([seq, pd.DataFrame([new_row])], ignore_index=True)
+        last_known_date = new_date
+
+    # when target_date is reached, return last predicted
+    try:
+        final_pred = int(seq.loc[seq['date'] == target_date, 'reported_cases'].iloc[-1])
+    except Exception:
+        final_pred = safe_int(seq['reported_cases'].iloc[-1], fallback=1)
+
+    return final_pred
+
 
 
 @app.get("/problems")
